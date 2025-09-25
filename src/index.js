@@ -45,48 +45,82 @@ async function readExcelData() {
     }
 }
 
-// Función para registrar una persona individual
-async function registerPerson(personData, index, total) {
-    const {
-        apellidoPat,
-        apellidoMat,
-        nombre1,
-        nombre2,
-        fotografia,
-        observacion
-    } = personData
+// Función para insertar datos en la base de datos local
+async function insertLocalDatabase(client, personData, index) {
+    try {
+        // Generar remisión única
+        const sremision = String(10000 + index).padStart(7, '0')
 
-    console.log(`\n🔄 [${index}/${total}] Procesando: ${nombre1} ${apellidoPat} ${apellidoMat}`)
+        console.log(`🗄️ Insertando en base de datos local...`)
+
+        // 1. INSERT en tdetenido
+        const detenidoData = {
+            snombre: `${personData.nombre1} ${personData.nombre2 || ''}`.trim(),
+            sapellidopaterno: personData.apellidoPat || '',
+            sapellidomaterno: personData.apellidoMat || '',
+            salias: personData.alias || '',
+            ssexo: 'M', // Por defecto, ajustar según necesidades
+            irepeticiones: 0
+        }
+
+        const resultDetenido = await insertTDetenido(client, detenidoData)
+        console.log(`✅ Detenido insertado con ID: ${resultDetenido.iiddetenido}`)
+
+        // 2. INSERT en tdetalledetencion
+        const detalleData = {
+            iiddetenido: resultDetenido.iiddetenido,
+            sremision: sremision,
+            dtfecha: null, // Usará CURRENT_DATE
+            shora: new Date().toLocaleTimeString('es-MX', {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit'
+            }),
+            stipoevento: 'DISPOSICIÓN',
+            sfundamento: '',
+            sconsistente: personData.observacion || '',
+            saliasdetencion: personData.alias || '',
+            iedad: 0
+        }
+
+        const resultDetalle = await insertTDetalleDetencion(client, detalleData)
+        console.log(`✅ Detalle detención insertado con ID: ${resultDetalle.iiddetalledetencion}`)
+
+        return {
+            success: true,
+            iiddetenido: resultDetenido.iiddetenido,
+            iiddetalledetencion: resultDetalle.iiddetalledetencion,
+            sremision: sremision
+        }
+
+    } catch (error) {
+        console.error(`❌ Error en base de datos local:`, error.message)
+        throw error
+    }
+}
+
+// Función para registrar una persona en Artemis
+async function registerPersonArtemis(personData, index, faceData) {
+    const { nombre1, nombre2, apellidoPat, apellidoMat } = personData
 
     // Construir nombre completo
     const fullName = `${nombre1}${nombre2 ? ' ' + nombre2 : ''}`
     const fullLastName = `${apellidoPat}${apellidoMat ? ' ' + apellidoMat : ''}`
 
-    // Procesar imagen si existe
-    let faceData = null
-    if (fotografia) {
-        const imagePath = path.join(process.cwd(), 'src', 'extracted_images', fotografia)
-        faceData = await imageToBase64(imagePath)
-
-        if (!faceData) {
-            console.warn(`⚠️  No se pudo cargar la imagen: ${fotografia}`)
-        }
-    }
-
     try {
-        // 1. Registrar persona
+        // 1. Registrar persona en Artemis
         const personPayload = {
-            personCode: String(1000000 + index).padStart(7, '0'), // Código único de 7 dígitos
+            personCode: String(1000000 + index).padStart(7, '0'),
             personFamilyName: fullLastName,
             personGivenName: fullName,
-            gender: 1, // Por defecto masculino, ajustar según necesidad
+            gender: 1, // Por defecto masculino
             orgIndexCode: '68',
             phoneNo: '',
             email: '',
             faces: faceData ? [{ faceData }] : []
         }
 
-        console.log(`📝 Registrando persona en sistema...`)
+        console.log(`🔗 Registrando persona en Artemis...`)
         const personResult = await queryArtemis(
             'POST',
             '/artemis/api/resource/v1/person/single/add',
@@ -94,11 +128,11 @@ async function registerPerson(personData, index, total) {
         )
 
         if (personResult.code !== '0') {
-            console.error(`❌ Error al registrar persona ${fullName}:`, personResult.msg)
-            return { success: false, error: personResult.msg, person: fullName }
+            console.error(`❌ Error al registrar persona en Artemis:`, personResult.msg)
+            throw new Error(personResult.msg)
         }
 
-        console.log(`✅ Persona registrada con ID: ${personResult.data}`)
+        console.log(`✅ Persona registrada en Artemis con ID: ${personResult.data}`)
 
         // 2. Agregar foto si existe
         if (faceData) {
@@ -115,7 +149,7 @@ async function registerPerson(personData, index, total) {
                 }
             }
 
-            console.log(`📸 Agregando foto...`)
+            console.log(`📸 Agregando foto a Artemis...`)
             const faceResult = await queryArtemis(
                 'POST',
                 '/artemis/api/frs/v1/face/single/addition',
@@ -123,34 +157,105 @@ async function registerPerson(personData, index, total) {
             )
 
             if (faceResult.code !== '0') {
-                console.warn(`⚠️  Error al agregar foto para ${fullName}:`, faceResult.msg)
+                console.warn(`⚠️ Error al agregar foto en Artemis:`, faceResult.msg)
                 return {
                     success: true,
-                    personId: personResult.data,
-                    person: fullName,
+                    artemisPersonId: personResult.data,
                     faceError: faceResult.msg
                 }
             }
 
-            console.log(`✅ Foto agregada exitosamente`)
+            console.log(`✅ Foto agregada exitosamente en Artemis`)
         }
 
         return {
             success: true,
-            personId: personResult.data,
-            person: fullName,
+            artemisPersonId: personResult.data,
             hasFace: !!faceData
         }
 
     } catch (error) {
-        console.error(`❌ Error procesando ${fullName}:`, error.message)
-        return { success: false, error: error.message, person: fullName }
+        console.error(`❌ Error procesando Artemis:`, error.message)
+        throw error
+    }
+}
+
+// Función para procesar una persona individual
+async function processPersonRecord(personData, index, total, client) {
+    const {
+        apellidoPat,
+        apellidoMat,
+        nombre1,
+        nombre2,
+        fotografia,
+        observacion
+    } = personData
+
+    console.log(`\n📄 [${index}/${total}] Procesando: ${nombre1} ${apellidoPat} ${apellidoMat}`)
+
+    // Validar datos mínimos
+    if (!nombre1 || !apellidoPat) {
+        throw new Error('Faltan datos mínimos: nombre1 o apellidoPat')
+    }
+
+    let localDbResult = null
+    let artemisResult = null
+    let faceData = null
+
+    // **FASE 1: INSERTS EN BASE DE DATOS LOCAL**
+    try {
+        await client.query('BEGIN') // Iniciar transacción
+
+        localDbResult = await insertLocalDatabase(client, personData, index)
+
+        await client.query('COMMIT') // Confirmar transacción
+        console.log('✅ Base de datos local: ÉXITO')
+
+    } catch (dbError) {
+        await client.query('ROLLBACK') // Deshacer cambios
+        console.error('❌ Base de datos local: FALLÓ')
+        throw new Error(`Error en BD local: ${dbError.message}`)
+    }
+
+    // **FASE 2: PROCESAMIENTO DE ARTEMIS (solo si BD local fue exitosa)**
+    try {
+        console.log('🚀 Base de datos local exitosa, procediendo con Artemis...')
+
+        // Procesar imagen si existe
+        if (fotografia) {
+            const imagePath = path.join(process.cwd(), 'src', 'extracted_images', fotografia)
+            faceData = await imageToBase64(imagePath)
+
+            if (!faceData) {
+                console.warn(`⚠️ No se pudo cargar la imagen: ${fotografia}`)
+            }
+        }
+
+        artemisResult = await registerPersonArtemis(personData, index, faceData)
+        console.log('✅ Artemis: ÉXITO')
+
+    } catch (artemisError) {
+        console.error('❌ Artemis: FALLÓ, pero datos locales se mantienen')
+        artemisResult = {
+            success: false,
+            error: artemisError.message
+        }
+    }
+
+    return {
+        success: true, // Consideramos éxito si la BD local funcionó
+        person: `${nombre1} ${apellidoPat}`,
+        localDb: localDbResult,
+        artemis: artemisResult,
+        hasFace: !!faceData
     }
 }
 
 // Función principal
 async function main() {
-    console.log('🚀 Iniciando registro masivo en HikConnect...\n')
+    console.log('🚀 Iniciando procesamiento: BD Local → Artemis\n')
+
+    let client = null
 
     try {
         // Leer datos del Excel
@@ -158,15 +263,20 @@ async function main() {
         const totalRecords = excelData.data.length
 
         if (totalRecords === 0) {
-            console.log('⚠️  No hay registros para procesar')
+            console.log('⚠️ No hay registros para procesar')
             return
         }
+
+        // Conectar a la base de datos
+        client = await pool.connect()
+        console.log('✅ Conexión a PostgreSQL establecida')
 
         // Estadísticas de procesamiento
         const stats = {
             total: totalRecords,
             success: 0,
-            errors: 0,
+            dbErrors: 0,
+            artemisErrors: 0,
             withPhoto: 0,
             withoutPhoto: 0,
             errorDetails: []
@@ -175,15 +285,11 @@ async function main() {
         console.log(`📋 Iniciando procesamiento de ${totalRecords} registros...\n`)
         console.log('='.repeat(60))
 
-        // Conexión a la base de datos
-        const client = await pool.connect()
-
         // Procesar cada registro
         for (let i = 0; i < excelData.data.length; i++) {
             const row = excelData.data[i]
 
-            // Mapear datos del Excel según los headers encontrados
-            // [No, APELLIDO_PAT, APELLIDO_MATERNO, NOMBRE_1, NOMBRE_2, FECHA_NACIMIENTO, ALIAS, OBSERVACION, FOTOGRAFIA]
+            // Mapear datos del Excel
             const personData = {
                 numero: row[0],
                 apellidoPat: row[1] || '',
@@ -196,86 +302,44 @@ async function main() {
                 fotografia: row[8] || ''
             }
 
-            // Validar datos mínimos
-            if (!personData.nombre1 || !personData.apellidoPat) {
-                console.warn(`⚠️  [${i + 1}/${totalRecords}] Registro ${personData.numero} omitido: faltan nombre o apellido`)
-                stats.errors++
-                continue
-            }
+            try {
+                const result = await processPersonRecord(personData, i + 1, totalRecords, client)
 
-            // MODO PRUEBA - Mostrar datos que se registrarían
-            console.log('📋 DATOS A REGISTRAR:')
-            console.log('='.repeat(40))
-            console.log(JSON.stringify(personData, null, 2))
-            console.log('📝 Código que se generaría:', String(1000000 + (i + 1)).padStart(7, '0'))
-            console.log('👤 Nombre completo:', `${personData.nombre1}${personData.nombre2 ? ' ' + personData.nombre2 : ''} ${personData.apellidoPat}${personData.apellidoMat ? ' ' + personData.apellidoMat : ''}`)
-            console.log('📸 Imagen:', personData.fotografia || 'Sin imagen')
-            console.log('='.repeat(40))
+                if (result.success) {
+                    stats.success++
+                    if (result.hasFace) {
+                        stats.withPhoto++
+                    } else {
+                        stats.withoutPhoto++
+                    }
 
-            // Simular resultado para estadísticas
-            const result = {
-                success: true,
-                hasFace: !!personData.fotografia,
-                person: `${personData.nombre1} ${personData.apellidoPat}`
-            }
-
-            // DESCOMENTA ESTA SECCIÓN CUANDO QUIERAS HACER EL REGISTRO REAL:
-            // const result = await registerPerson(personData, i + 1, totalRecords)
-
-            // INSERT en la base de datos local tdetenido
-            const idInsertDetenido = await insertTDetenido(
-                client,
-                {
-                    snombre: `${personData.nombre1} ${personData.nombre2}`.trim(),
-                    sapellidopaterno: personData.apellidoPat,
-                    sapellidomaterno: personData.apellidoMat,
-                    salias: personData.alias
+                    if (!result.artemis.success) {
+                        stats.artemisErrors++
+                    }
                 }
-            )
 
-            // INSERT en la base de datos local tdetalledetencion
-            const idDetalleDetencion = await insertTDetalleDetencion(
-                client,
-                {
-                    iiddetenido: idInsertDetenido.iiddetenido,
-                    sremision: '00000',
-                    dtfecha: 'NOW()',
-                    shora: '00:00',
-                    stipoevento: 'DISPOSICIÓN',
-                    sfundamento: '',
-                    sconsistente: personData.observacion,
-                    saliasdetencion: personData.alias,
-                    iedad: 0,
-                }
-            )
-
-            if (result.success) {
-                stats.success++
-                if (result.hasFace) {
-                    stats.withPhoto++
-                } else {
-                    stats.withoutPhoto++
-                }
-            } else {
-                stats.errors++
+            } catch (error) {
+                stats.dbErrors++
                 stats.errorDetails.push({
-                    person: result.person,
-                    error: result.error
+                    person: `${personData.nombre1} ${personData.apellidoPat}`,
+                    error: error.message
                 })
+                console.error(`❌ Error procesando registro ${i + 1}:`, error.message)
             }
 
-            // Pausa entre registros para no saturar la API
-            await new Promise(resolve => setTimeout(resolve, 1000))
+            // Pausa entre registros
+            await new Promise(resolve => setTimeout(resolve, 1500))
         }
 
         // Mostrar estadísticas finales
         console.log('\n' + '='.repeat(60))
         console.log('📊 RESUMEN DE PROCESAMIENTO:')
         console.log('='.repeat(60))
-        console.log(`✅ Registros exitosos: ${stats.success}/${stats.total}`)
+        console.log(`✅ Registros procesados exitosamente: ${stats.success}/${stats.total}`)
+        console.log(`🗄️ Errores en base de datos local: ${stats.dbErrors}`)
+        console.log(`🔗 Errores solo en Artemis: ${stats.artemisErrors}`)
         console.log(`📸 Con fotografía: ${stats.withPhoto}`)
         console.log(`👤 Sin fotografía: ${stats.withoutPhoto}`)
-        console.log(`❌ Errores: ${stats.errors}`)
 
         if (stats.errorDetails.length > 0) {
             console.log('\n🚨 DETALLES DE ERRORES:')
@@ -289,6 +353,12 @@ async function main() {
     } catch (error) {
         console.error('💥 Error fatal en el procesamiento:', error.message)
         console.error(error.stack)
+    } finally {
+        // Liberar conexión
+        if (client) {
+            client.release()
+            console.log('🔌 Conexión a PostgreSQL liberada')
+        }
     }
 }
 
