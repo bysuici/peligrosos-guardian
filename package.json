@@ -1,0 +1,22 @@
+{
+  "name": "peligrosos-guardian",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "Jesus Eduardo Ramirez Navarro 'BySuici'",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "cls && nodemon src/index.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.2",
+    "pg": "^8.16.3",
+    "xlsx": "^0.18.5"
+  }
+}
